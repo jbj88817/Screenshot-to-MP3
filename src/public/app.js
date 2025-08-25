@@ -51,10 +51,15 @@
         const query = (rows[idx] || '').trim();
         if (!query) return;
         dl.disabled = true;
+        dl.textContent = 'Stop';
         try {
           const start = await fetch('/api/track-jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query }) });
           if (!start.ok) throw new Error('Failed to start track job');
           const { id } = await start.json();
+          // Allow stopping
+          let cancelled = false;
+          const onStop = async () => { if (cancelled) return; cancelled = true; await fetch(`/api/track-jobs/${id}`, { method: 'DELETE' }); };
+          dl.onclick = onStop;
           await new Promise((resolve, reject) => {
             const poll = async () => {
               try {
@@ -88,6 +93,8 @@
           statusEl.textContent = 'Download error';
         } finally {
           dl.disabled = false;
+          dl.textContent = 'Download';
+          dl.onclick = null;
         }
       });
       actions.appendChild(dl);

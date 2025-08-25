@@ -113,6 +113,7 @@ type TrackJob = {
   filePath?: string;
   filename?: string;
   error?: string;
+  controller: AbortController;
 };
 
 const trackJobs = new Map<string, TrackJob>();
@@ -121,11 +122,12 @@ app.post('/api/track-jobs', async (req: Request, res: Response) => {
   const { query } = req.body as { query: string };
   if (!query || typeof query !== 'string') return res.status(400).json({ error: 'query required' });
   const id = crypto.randomUUID();
-  const job: TrackJob = { id, query, updates: [], done: false };
+  const controller = new AbortController();
+  const job: TrackJob = { id, query, updates: [], done: false, controller };
   trackJobs.set(id, job);
   void (async () => {
     try {
-      const result = await downloadSingleWithProgress(query, (u) => job.updates.push(u));
+      const result = await downloadSingleWithProgress(query, (u) => job.updates.push(u), controller.signal);
       job.filePath = result.filePath;
       job.filename = result.filename;
       job.done = true;
@@ -155,6 +157,14 @@ app.get('/api/track-jobs/:id/download', (req: Request, res: Response) => {
   const stream = fs.createReadStream(job.filePath as string);
   stream.on('close', () => fs.unlink(job.filePath as string, () => {}));
   stream.pipe(res);
+});
+
+app.delete('/api/track-jobs/:id', (req: Request, res: Response) => {
+  const id = req.params.id as string;
+  const job = trackJobs.get(id);
+  if (!job) return res.status(404).json({ error: 'Not found' });
+  if (!job.done) job.controller.abort();
+  res.json({ ok: true });
 });
 
 const PORT = process.env.PORT || 3000;

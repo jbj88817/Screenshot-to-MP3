@@ -78,7 +78,15 @@ function parseYtDlpProgressLine(line: string): { percent?: number; phase?: Track
   return {};
 }
 
-async function runSingleDownload(query: string, outDir: string, base: string, onUpdate: (line: string) => void): Promise<void> {
+async function runSingleDownload(
+  query: string,
+  outDir: string,
+  base: string,
+  onUpdate: (line: string) => void,
+  opts: { timeoutMs?: number; inactivityMs?: number; signal?: AbortSignal } = {}
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 120000; // 2 minutes
+  const inactivityMs = opts.inactivityMs ?? 30000; // 30s without output
   const args = [
     `ytsearch1:${query}`,
     '-x', '--audio-format', 'mp3', '--audio-quality', '0',
@@ -86,17 +94,68 @@ async function runSingleDownload(query: string, outDir: string, base: string, on
     '--no-playlist', '--newline', '--no-warnings'
   ];
   await new Promise<void>((resolve, reject) => {
+    if (opts.signal?.aborted) {
+      return reject(new Error('Aborted'));
+    }
     const child = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let finished = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let quietTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const clearTimers = () => {
+      if (timer) clearTimeout(timer);
+      if (quietTimer) clearTimeout(quietTimer);
+    };
+
+    const startTimers = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (!finished) {
+          child.kill('SIGKILL');
+          finished = true;
+          clearTimers();
+          reject(new Error('Timeout while downloading'));
+        }
+      }, timeoutMs);
+      resetQuietTimer();
+    };
+
+    const resetQuietTimer = () => {
+      if (quietTimer) clearTimeout(quietTimer);
+      quietTimer = setTimeout(() => {
+        if (!finished) {
+          child.kill('SIGKILL');
+          finished = true;
+          clearTimers();
+          reject(new Error('No output from yt-dlp (network stalled)'));
+        }
+      }, inactivityMs);
+    };
+
+    startTimers();
+    opts.signal?.addEventListener('abort', () => {
+      if (!finished) {
+        child.kill('SIGKILL');
+        finished = true;
+        clearTimers();
+        reject(new Error('Aborted'));
+      }
+    });
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
+      resetQuietTimer();
       chunk.split(/\r?\n/).forEach((line) => line && onUpdate(line));
     });
     child.stderr.on('data', (chunk: string) => {
+      resetQuietTimer();
       chunk.split(/\r?\n/).forEach((line) => line && onUpdate(line));
     });
-    child.on('error', reject);
+    child.on('error', (e) => { clearTimers(); reject(e); });
     child.on('close', (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimers();
       if (code === 0) resolve();
       else reject(new Error(`yt-dlp exited with code ${code}`));
     });
@@ -143,7 +202,8 @@ export async function downloadTracksZipWithProgress(
 
 export async function downloadSingleWithProgress(
   query: string,
-  onProgress: (u: Omit<ProgressUpdate, 'trackIndex'> & { trackIndex?: number }) => void
+  onProgress: (u: Omit<ProgressUpdate, 'trackIndex'> & { trackIndex?: number }) => void,
+  signal?: AbortSignal
 ): Promise<{ filePath: string; filename: string }> {
   await ensureTools();
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ytmp3-'));
@@ -154,15 +214,29 @@ export async function downloadSingleWithProgress(
   const baseTemplate = '%(artist,uploader,channel)s - %(track,title)s.%(ext)s';
   const output = path.join(outDir, baseTemplate);
   onProgress({ phase: 'searching' });
-  await runSingleDownload(query, outDir, output.replace(/\.%(ext)s$/, ''), (line) => {
-    const info = parseYtDlpProgressLine(line);
-    if (info.destination) destinationPath = info.destination;
-    if (info.phase || info.percent !== undefined) {
-      const payload: any = { phase: (info.phase ?? 'downloading') };
-      if (info.percent !== undefined) payload.percent = info.percent;
-      onProgress(payload);
-    }
-  });
+  try {
+    await runSingleDownload(query, outDir, output.replace(/\.%(ext)s$/, ''), (line) => {
+      const info = parseYtDlpProgressLine(line);
+      if (info.destination) destinationPath = info.destination;
+      if (info.phase || info.percent !== undefined) {
+        const payload: any = { phase: (info.phase ?? 'downloading') };
+        if (info.percent !== undefined) payload.percent = info.percent;
+        onProgress(payload);
+      }
+    }, { signal: signal as AbortSignal });
+  } catch (e) {
+    // Fallback: try appending ' audio' to the query once
+    onProgress({ phase: 'searching', message: 'retrying with audio' } as any);
+    await runSingleDownload(`${query} audio`, outDir, output.replace(/\.%(ext)s$/, ''), (line) => {
+      const info = parseYtDlpProgressLine(line);
+      if (info.destination) destinationPath = info.destination;
+      if (info.phase || info.percent !== undefined) {
+        const payload: any = { phase: (info.phase ?? 'downloading') };
+        if (info.percent !== undefined) payload.percent = info.percent;
+        onProgress(payload);
+      }
+    }, { signal: signal as AbortSignal });
+  }
   // Determine final file path
   let filePath: string;
   if (destinationPath) {
