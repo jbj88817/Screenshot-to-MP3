@@ -10,6 +10,13 @@
 
   const rows = [];
 
+  const urlPattern = /^https?:\/\/\S+/i;
+  const makeTrackPayload = (value) => {
+    const trimmed = (value || '').trim();
+    if (!trimmed) return {};
+    return urlPattern.test(trimmed) ? { url: trimmed } : { query: trimmed };
+  };
+
   function render() {
     list.innerHTML = '';
     rows.forEach((value, idx) => {
@@ -17,7 +24,7 @@
       row.className = 'row';
       const input = document.createElement('input');
       input.value = value;
-      input.placeholder = 'Song Title - Artist';
+      input.placeholder = 'Song title or YouTube/HTTP link';
       input.addEventListener('input', () => {
         rows[idx] = input.value;
         updateDownloadState();
@@ -50,11 +57,24 @@
       dl.addEventListener('click', async () => {
         const query = (rows[idx] || '').trim();
         if (!query) return;
+        const payload = makeTrackPayload(query);
+        if (!payload.query && !payload.url) return;
         dl.disabled = true;
         dl.textContent = 'Stop';
         try {
-          const start = await fetch('/api/track-jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query }) });
-          if (!start.ok) throw new Error('Failed to start track job');
+          const start = await fetch('/api/track-jobs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          if (!start.ok) {
+            let errMsg = 'Failed to start track job';
+            try {
+              const body = await start.json();
+              if (body?.error) errMsg = body.error;
+            } catch (_) { /* ignore */ }
+            throw new Error(errMsg);
+          }
           const { id } = await start.json();
           // Allow stopping
           let cancelled = false;
@@ -178,12 +198,21 @@
     try {
       for (let i = 0; i < usable.length; i++) {
         const line = usable[i];
+        const payload = makeTrackPayload(line);
+        if (!payload.query && !payload.url) continue;
         const start = await fetch('/api/track-jobs', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: line })
+          body: JSON.stringify(payload)
         });
-        if (!start.ok) throw new Error('Failed to start track job');
+        if (!start.ok) {
+          let errMsg = 'Failed to start track job';
+          try {
+            const body = await start.json();
+            if (body?.error) errMsg = body.error;
+          } catch (_) { /* ignore */ }
+          throw new Error(errMsg);
+        }
         const { id } = await start.json();
         await new Promise((resolve, reject) => {
           const poll = async () => {
@@ -222,6 +251,11 @@
       downloadBtn.disabled = false;
     }
   });
+
+  // Start with one row so users can paste a link immediately
+  rows.push('');
+  render();
+  updateDownloadState();
 })();
 
 

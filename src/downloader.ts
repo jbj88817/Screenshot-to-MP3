@@ -7,6 +7,52 @@ import os from 'node:os';
 import pLimit from 'p-limit';
 
 const exec = promisify(execCb);
+const audioExtPattern = /\.(mp3|m4a|opus|webm|mka|mp4)$/i;
+
+async function ensureMp3(filePath: string): Promise<string> {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.mp3') return filePath;
+  const target = filePath.replace(/\.[^/.]+$/, '.mp3');
+  // eslint-disable-next-line no-console
+  console.log('Converting to mp3', { filePath, target });
+  await exec(`ffmpeg -y -i "${filePath}" -vn -acodec libmp3lame -q:a 2 "${target}"`);
+  return target;
+}
+
+async function normalizeMp3Path(filePath: string): Promise<{ filePath: string; filename: string }> {
+  const dir = path.dirname(filePath);
+  const baseNoExt = path.basename(filePath).replace(/\.(?:mp3|m4a|opus|webm|mka|mp4)(?:\.(?:mp3|m4a|opus|webm|mka|mp4))*$/gi, '').replace(/^out[\\/]/, '');
+  const cleanName = `${baseNoExt}.mp3`;
+  const cleanPath = path.join(dir, cleanName);
+  if (cleanPath !== filePath) {
+    try {
+      await fs.rename(filePath, cleanPath);
+    } catch {
+      await fs.copyFile(filePath, cleanPath);
+      await fs.unlink(filePath).catch(() => {});
+    }
+    // eslint-disable-next-line no-console
+    console.log('Normalized mp3 path', { from: filePath, to: cleanPath });
+  }
+  return { filePath: cleanPath, filename: cleanName };
+}
+
+async function findFirstAudio(root: string): Promise<string | undefined> {
+  const stack: string[] = [root];
+  while (stack.length) {
+    const current = stack.pop() as string;
+    const entries = await fs.readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+      } else if (audioExtPattern.test(entry.name)) {
+        return full;
+      }
+    }
+  }
+  return undefined;
+}
 
 async function ensureTools() {
   try { await exec('yt-dlp --version'); } catch { throw new Error('yt-dlp is not installed. On macOS: brew install yt-dlp'); }
@@ -83,12 +129,13 @@ async function runSingleDownload(
   outDir: string,
   base: string,
   onUpdate: (line: string) => void,
-  opts: { timeoutMs?: number; inactivityMs?: number; signal?: AbortSignal } = {}
+  opts: { timeoutMs?: number; inactivityMs?: number; signal?: AbortSignal; useSearch?: boolean } = {}
 ): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? 120000; // 2 minutes
   const inactivityMs = opts.inactivityMs ?? 30000; // 30s without output
+  const source = opts.useSearch === false ? query : `ytsearch1:${query}`;
   const args = [
-    `ytsearch1:${query}`,
+    source,
     '-x', '--audio-format', 'mp3', '--audio-quality', '0',
     '-o', `${path.join(outDir, base)}.%(ext)s`,
     '--no-playlist', '--newline', '--no-warnings'
@@ -237,17 +284,70 @@ export async function downloadSingleWithProgress(
       }
     }, { signal: signal as AbortSignal });
   }
-  // Determine final file path
+  // Determine final file path. Prefer actual audio artifacts in outDir.
+  const files = await fs.readdir(outDir);
+  const audio = files.find((f) => audioExtPattern.test(f));
   let filePath: string;
-  if (destinationPath) {
-    filePath = destinationPath;
+  if (audio) {
+    filePath = path.join(outDir, audio);
   } else {
-    const files = await fs.readdir(outDir);
-    const mp3 = files.find((f) => /\.(mp3|m4a|opus|webm|mka)$/i.test(f));
-    if (!mp3) throw new Error('Output file not found');
-    filePath = path.join(outDir, mp3);
+    const found = await findFirstAudio(outDir);
+    if (found) filePath = found;
+    else if (destinationPath) filePath = destinationPath;
+    else throw new Error('Output file not found');
   }
-  const filename = path.basename(filePath);
-  return { filePath, filename };
+  filePath = await ensureMp3(filePath);
+  // eslint-disable-next-line no-console
+  console.log('Resolved single download file', { filePath });
+  return normalizeMp3Path(filePath);
+}
+
+export async function downloadUrlWithProgress(
+  url: string,
+  onProgress: (u: Omit<ProgressUpdate, 'trackIndex'> & { trackIndex?: number }) => void,
+  signal?: AbortSignal
+): Promise<{ filePath: string; filename: string }> {
+  await ensureTools();
+  const trimmed = (url || '').trim();
+  try {
+    const parsed = new URL(trimmed);
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Only http/https URLs are supported');
+  } catch (e) {
+    throw new Error(`Invalid URL: ${(e as Error).message}`);
+  }
+
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ytmp3-'));
+  const outDir = path.join(workDir, 'out');
+  await fs.mkdir(outDir);
+
+  let destinationPath: string | undefined;
+  const baseTemplate = '%(title)s.%(ext)s';
+  const output = path.join(outDir, baseTemplate);
+  onProgress({ phase: 'searching', message: 'fetching' });
+  await runSingleDownload(trimmed, outDir, output.replace(/\.%(ext)s$/, ''), (line) => {
+    const info = parseYtDlpProgressLine(line);
+    if (info.destination) destinationPath = info.destination;
+    if (info.phase || info.percent !== undefined) {
+      const payload: any = { phase: (info.phase ?? 'downloading') };
+      if (info.percent !== undefined) payload.percent = info.percent;
+      onProgress(payload);
+    }
+  }, { signal: signal as AbortSignal, useSearch: false });
+
+  const files = await fs.readdir(outDir);
+  const audio = files.find((f) => audioExtPattern.test(f));
+  let filePath: string;
+  if (audio) {
+    filePath = path.join(outDir, audio);
+  } else {
+    const found = await findFirstAudio(outDir);
+    if (found) filePath = found;
+    else if (destinationPath) filePath = destinationPath;
+    else throw new Error('Output file not found');
+  }
+  filePath = await ensureMp3(filePath);
+  // eslint-disable-next-line no-console
+  console.log('Resolved url download file', { filePath });
+  return normalizeMp3Path(filePath);
 }
 

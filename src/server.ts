@@ -3,7 +3,7 @@ import multer from 'multer';
 import path from 'node:path';
 import fs from 'node:fs';
 import { extractTracksFromImage } from './ocr.js';
-import { downloadTracksZip, downloadTracksZipWithProgress, downloadSingleWithProgress, type ProgressUpdate } from './downloader.js';
+import { downloadTracksZip, downloadTracksZipWithProgress, downloadSingleWithProgress, downloadUrlWithProgress, type ProgressUpdate } from './downloader.js';
 import crypto from 'node:crypto';
 
 const app = express();
@@ -107,7 +107,8 @@ app.get('/api/jobs/:id/download', (req: Request, res: Response) => {
 // Single-track endpoints
 type TrackJob = {
   id: string;
-  query: string;
+  query?: string;
+  url?: string;
   updates: Omit<ProgressUpdate, 'trackIndex'>[];
   done: boolean;
   filePath?: string;
@@ -119,15 +120,29 @@ type TrackJob = {
 const trackJobs = new Map<string, TrackJob>();
 
 app.post('/api/track-jobs', async (req: Request, res: Response) => {
-  const { query } = req.body as { query: string };
-  if (!query || typeof query !== 'string') return res.status(400).json({ error: 'query required' });
+  const { query, url } = req.body as { query?: string; url?: string };
+  // Debug visibility for incoming payloads
+  // eslint-disable-next-line no-console
+  console.log('POST /api/track-jobs body:', req.body);
+  const raw = typeof url === 'string' && url.trim().length > 0
+    ? url
+    : typeof query === 'string'
+      ? query
+      : '';
+  const trimmed = raw.trim();
+  if (!trimmed) return res.status(400).json({ error: 'query or url required', body: req.body });
+  const isUrl = /^https?:\/\//i.test(trimmed);
   const id = crypto.randomUUID();
   const controller = new AbortController();
-  const job: TrackJob = { id, query, updates: [], done: false, controller };
+  const job: TrackJob = { id, updates: [], done: false, controller };
+  if (isUrl) job.url = trimmed;
+  else job.query = trimmed;
   trackJobs.set(id, job);
   void (async () => {
     try {
-      const result = await downloadSingleWithProgress(query, (u) => job.updates.push(u), controller.signal);
+      const result = job.url
+        ? await downloadUrlWithProgress(job.url, (u) => job.updates.push(u), controller.signal)
+        : await downloadSingleWithProgress(job.query as string, (u) => job.updates.push(u), controller.signal);
       job.filePath = result.filePath;
       job.filename = result.filename;
       job.done = true;
