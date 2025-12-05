@@ -2,11 +2,12 @@
   "name": "shottomp3",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "electron-main.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
     "dev": "nodemon --watch src --exec \"npm run build && node dist/server.js\"",
+    "desktop": "npm run build && electron .",
     "lint": "eslint . || true"
   },
   "keywords": [],
@@ -28,6 +29,7 @@
     "@types/multer": "^2.0.0",
     "@types/node": "^24.3.0",
     "eslint": "^9.34.0",
+    "electron": "^32.1.2",
     "nodemon": "^3.1.10",
     "typescript": "^5.9.2"
   }
