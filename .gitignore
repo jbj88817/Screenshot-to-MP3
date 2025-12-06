@@ -3,6 +3,7 @@ node_modules
 
 # build
 dist
+release
 uploads
 *.log
 

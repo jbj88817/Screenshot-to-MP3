@@ -8,6 +8,8 @@
     "start": "node dist/server.js",
     "dev": "nodemon --watch src --exec \"npm run build && node dist/server.js\"",
     "desktop": "npm run build && electron .",
+    "pack:mac": "npm run build && electron-builder --mac --dir",
+    "dist:mac": "npm run build && electron-builder --mac",
     "lint": "eslint . || true"
   },
   "keywords": [],
@@ -30,7 +32,36 @@
     "@types/node": "^24.3.0",
     "eslint": "^9.34.0",
     "electron": "^32.1.2",
+    "electron-builder": "^25.1.8",
     "nodemon": "^3.1.10",
     "typescript": "^5.9.2"
+  },
+  "build": {
+    "appId": "com.shottomp3.app",
+    "productName": "ShotToMp3",
+    "asar": true,
+    "files": [
+      "dist/**/*",
+      "electron-main.js",
+      "src/public/**/*",
+      "*.traineddata",
+      "!uploads/**"
+    ],
+    "extraResources": [
+      {
+        "from": "*.traineddata",
+        "to": "traineddata"
+      }
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.music"
+    }
   }
 }

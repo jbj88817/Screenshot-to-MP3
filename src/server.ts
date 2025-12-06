@@ -6,14 +6,26 @@ import { extractTracksFromImage } from './ocr.js';
 import { downloadTracksZip, downloadTracksZipWithProgress, downloadSingleWithProgress, downloadUrlWithProgress, type ProgressUpdate } from './downloader.js';
 import crypto from 'node:crypto';
 
+function ensureToolPath() {
+  const extras = ['/opt/homebrew/bin', '/usr/local/bin'];
+  const current = process.env.PATH || '';
+  const parts = current.split(':').filter(Boolean);
+  const merged = [...extras, ...parts.filter((p) => !extras.includes(p))];
+  process.env.PATH = merged.join(':');
+}
+
 const app = express();
-const upload = multer({ dest: path.join(process.cwd(), 'uploads') });
+ensureToolPath();
+const appRoot = process.env.APP_ROOT || process.cwd();
+const uploadsDir = process.env.APP_UPLOAD_DIR || path.join(appRoot, 'uploads');
+fs.mkdirSync(uploadsDir, { recursive: true });
+const upload = multer({ dest: uploadsDir });
 
 app.use(express.json({ limit: '2mb' }));
-app.use('/static', express.static(path.join(process.cwd(), 'src/public')));
+app.use('/static', express.static(path.join(appRoot, 'src/public')));
 
 app.get('/', (_req: Request, res: Response) => {
-  res.sendFile(path.join(process.cwd(), 'src/public/index.html'));
+  res.sendFile(path.join(appRoot, 'src/public/index.html'));
 });
 
 app.post('/api/ocr', upload.single('image'), async (req: Request, res: Response) => {
